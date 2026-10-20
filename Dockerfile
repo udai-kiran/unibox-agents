@@ -42,7 +42,7 @@ ENV CLAUDE_CONFIG_DIR=${HOME}/.claude
 
 # Pre-create the mount points so named volumes inherit agent ownership.
 RUN install -d -o ${USERNAME} -g ${USERNAME} /workspace \
-        ${HOME}/.zsh_history.d ${HOME}/.claude ${HOME}/.codex ${HOME}/.gemini ${HOME}/.gemini/config ${HOME}/.dsh ${HOME}/.dsh ${HOME}/.pi ${HOME}/.pi/agent ${HOME}/.pi/agent/extensions \
+        ${HOME}/.zsh_history.d ${HOME}/.inodex ${HOME}/.claude ${HOME}/.codex ${HOME}/.gemini ${HOME}/.gemini/config ${HOME}/.dsh ${HOME}/.dsh ${HOME}/.pi ${HOME}/.pi/agent ${HOME}/.pi/agent/extensions \
         ${HOME}/.config ${HOME}/.config/opencode ${HOME}/.local ${HOME}/.local/share ${HOME}/.local/share/opencode
 
 USER ${USERNAME}
@@ -79,22 +79,16 @@ RUN arch="$(dpkg --print-architecture)" \
     && install -m 0755 "${f}" "$HOME/.local/bin/inodex" \
     && inodex version
 
-# multi-agent-workflow: agent/hook/script template, kept at ~/multi-agent-workflow (pinned commit).
-# Its check-binaries.sh wants `fd`; Ubuntu installs it as `fdfind`.
-ARG WORKFLOW_REF=8881a432699c4f59f9789b21a97bbc74f088bc65
-RUN git clone https://github.com/udai-kiran/multi-agent-workflow.git ~/multi-agent-workflow \
-    && git -C ~/multi-agent-workflow checkout --quiet ${WORKFLOW_REF} \
-    && ln -s "$(command -v fdfind)" ~/.local/bin/fd
+# `fd` is installed by Ubuntu as `fdfind`; the workflow scripts expect `fd`.
+RUN ln -s "$(command -v fdfind)" ~/.local/bin/fd
 
-# Install the workflow into each agent's config dir and register inodex as an MCP server
-# for claude, codex, agy, opencode, pi and dsh. Volumes only inherit this when first created (see README).
-# claude/: the host's status line and non-sensitive settings, merged over the workflow's settings.json.
-COPY --chown=${USERNAME}:${USERNAME} claude/ ${HOME}/.claude-overlay/
-RUN cp -r ~/multi-agent-workflow/.claude/. ~/.claude/ \
-    && install -m 0755 ~/.claude-overlay/statusline.sh ~/.claude/statusline.sh \
-    && jq -s '.[0] * .[1]' ~/.claude/settings.json ~/.claude-overlay/settings.json > ~/.claude/settings.merged \
-    && mv ~/.claude/settings.merged ~/.claude/settings.json && rm -rf ~/.claude-overlay \
-    && cp ~/multi-agent-workflow/.codex/AGENTS.md ~/.codex/AGENTS.md \
+# Agent config from this repo: claude/ (settings, hooks, status line, CLAUDE.md), codex/AGENTS.md
+# (reviewer guidance), personas/. Then register inodex as an MCP server for every agent.
+# Volumes only inherit this when first created (see README).
+COPY --chown=${USERNAME}:${USERNAME} claude/ ${HOME}/.claude/
+COPY --chown=${USERNAME}:${USERNAME} codex/AGENTS.md ${HOME}/.codex/AGENTS.md
+COPY --chown=${USERNAME}:${USERNAME} personas/ ${HOME}/personas/
+RUN true \
     && claude mcp add --scope user inodex -- inodex serve \
     && printf '\n[mcp_servers.inodex]\ncommand = "inodex"\nargs = ["serve"]\n' >> ~/.codex/config.toml \
     && agy mcp add inodex inodex serve \
@@ -105,6 +99,10 @@ COPY --chown=${USERNAME}:${USERNAME} dsh-cordis.patch.yml ${HOME}/.dsh/cordis.pa
 
 # Team role prompts (orchestrator/reviewer/worker) for the inodex multi-agent setup
 COPY --chown=${USERNAME}:${USERNAME} roles/ ${HOME}/roles/
+
+# Trace viewer (FastAPI), run by the `traces` compose service
+COPY --chown=${USERNAME}:${USERNAME} traces/ ${HOME}/traces/
+RUN python3 -m venv ~/.venvs/traces && ~/.venvs/traces/bin/pip install --no-cache-dir -r ~/traces/requirements.txt
 
 # herdr agent integrations: hooks/extensions that let herdr see each agent's state
 RUN for agent in claude codex opencode pi antigravity-cli; do herdr integration install "$agent"; done \

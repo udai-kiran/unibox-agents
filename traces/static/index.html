@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent traces</title>
+<style>
+:root { --bg:#fff; --fg:#1f2328; --mut:#656d76; --line:#d0d7de; --card:#f6f8fa; --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e; --accent:#0969da; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --mut:#8b949e; --line:#30363d; --card:#161b22; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#58a6ff; } }
+* { box-sizing:border-box; }
+body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui,sans-serif; }
+header { display:flex; flex-wrap:wrap; gap:12px; align-items:baseline; margin-bottom:16px; }
+h1 { font-size:18px; margin:0; }
+#status { color:var(--mut); }
+section { border:1px solid var(--line); border-radius:6px; margin-bottom:16px; background:var(--card); overflow-x:auto; }
+section > h2 { font-size:14px; margin:0; padding:8px 12px; border-bottom:1px solid var(--line); display:flex; flex-wrap:wrap; gap:12px; }
+table { border-collapse:collapse; width:100%; min-width:640px; }
+td { padding:4px 12px; border-top:1px solid var(--line); vertical-align:top; }
+tr:first-child td { border-top:0; }
+.t { color:var(--mut); white-space:nowrap; font-variant-numeric:tabular-nums; }
+.badge { font-size:12px; padding:0 6px; border-radius:10px; border:1px solid var(--line); }
+.acked { color:var(--ok); } .claimed { color:var(--warn); } .pending { color:var(--accent); } .deadletter { color:var(--bad); }
+.approve { color:var(--ok); } .changes_requested { color:var(--bad); }
+details pre { margin:4px 0 0; padding:8px; background:var(--bg); border:1px solid var(--line); border-radius:4px; overflow-x:auto; font-size:12px; }
+summary { cursor:pointer; color:var(--accent); }
+</style>
+</head>
+<body>
+<header><h1>Agent traces</h1><span id="status">loading…</span></header>
+<main id="threads"></main>
+<script>
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+const time = ts => ts ? ts.slice(11, 23) : "";
+
+function renderThread(t) {
+  const sec = el("section");
+  const h = el("h2");
+  h.append(el("span", "", t.correlation_id || "(no correlation id)"), el("span", "t", `${t.messages.length} messages`));
+  if (t.rounds) h.append(el("span", "t", `rounds: ${t.rounds}`));
+  if (t.last_verdict) h.append(el("span", t.last_verdict, `last verdict: ${t.last_verdict}`));
+  sec.append(h);
+  const table = el("table");
+  for (const m of t.messages) {
+    const tr = el("tr");
+    const p = m.payload && typeof m.payload === "object" ? m.payload : {};
+    const detail = el("details");
+    detail.append(el("summary", "", "payload"), el("pre", "", JSON.stringify(m.payload, null, 2)));
+    const tds = [
+      el("td", "t", time(m.timestamp)),
+      el("td", "", `${m.from} → ${m.to}`),
+      el("td", "", m.type + (p.round ? ` (round ${p.round})` : "")),
+      el("td", p.verdict || "", p.verdict || ""),
+      el("td"),
+      el("td", "t", time(m.state_changed_at)),
+    ];
+    tds[4].append(el("span", `badge ${m.state}`, m.state));
+    const last = el("td"); last.append(detail);
+    tr.append(...tds, last);
+    table.append(tr);
+  }
+  sec.append(table);
+  return sec;
+}
+
+async function refresh() {
+  try {
+    const threads = await (await fetch("/api/threads")).json();
+    const open = new Set([...document.querySelectorAll("details[open]")].map(d => d.closest("tr")?.rowIndex + ":" + d.closest("section")?.querySelector("h2 span")?.textContent));
+    const main = document.getElementById("threads");
+    main.replaceChildren(...threads.map(renderThread));
+    document.querySelectorAll("section").forEach(s => s.querySelectorAll("tr").forEach(tr => {
+      if (open.has(tr.rowIndex + ":" + s.querySelector("h2 span").textContent)) tr.querySelector("details").open = true;
+    }));
+    document.getElementById("status").textContent = `${threads.length} threads · updated ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    document.getElementById("status").textContent = "error: " + e;
+  }
+}
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
