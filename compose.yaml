@@ -17,12 +17,14 @@ services:
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
       - GEMINI_API_KEY
+      - DEEPSEEK_API_KEY
     volumes:
       - workspace:/workspace
       - zsh-history:/home/agent/.zsh_history.d
       - claude:/home/agent/.claude
       - codex:/home/agent/.codex
       - gemini:/home/agent/.gemini # agy keeps its state in ~/.gemini/antigravity-cli
+      - dsh:/home/agent/.dsh
       - pi:/home/agent/.pi
       - opencode-config:/home/agent/.config/opencode
       - opencode-data:/home/agent/.local/share/opencode
@@ -33,6 +35,7 @@ volumes:
   claude:
   codex:
   gemini:
+  dsh:
   pi:
   opencode-config:
   opencode-data:
