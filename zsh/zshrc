@@ -1,0 +1,12 @@
+# Container zshrc: powerlevel10k prompt + autosuggestions. Host config is deliberately not copied.
+export HISTFILE=$HOME/.zsh_history.d/history HISTSIZE=10000 SAVEHIST=10000
+setopt SHARE_HISTORY HIST_IGNORE_DUPS
+
+autoload -Uz compinit && compinit
+bindkey -e
+
+. "$NVM_DIR/nvm.sh"
+
+source ~/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh
+source ~/.zsh/powerlevel10k/powerlevel10k.zsh-theme
+[[ -f ~/.p10k.zsh ]] && source ~/.p10k.zsh
