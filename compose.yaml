@@ -21,6 +21,7 @@ services:
     volumes:
       - workspace:/workspace
       - zsh-history:/home/agent/.zsh_history.d
+      - inodex:/home/agent/.inodex # agent mailboxes; the traces service reads them
       - claude:/home/agent/.claude
       - codex:/home/agent/.codex
       - gemini:/home/agent/.gemini # agy keeps its state in ~/.gemini/antigravity-cli
@@ -29,8 +30,23 @@ services:
       - opencode-config:/home/agent/.config/opencode
       - opencode-data:/home/agent/.local/share/opencode
 
+  # Read-only web view of the inodex mailboxes (message traces) at http://127.0.0.1:8000
+  traces:
+    image: unibox-agents:latest
+    working_dir: /home/agent/traces
+    command: ["/home/agent/.venvs/traces/bin/uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    read_only: true
+    volumes:
+      - inodex:/home/agent/.inodex:ro
+
 volumes:
   workspace:
+  inodex:
   zsh-history:
   claude:
   codex:

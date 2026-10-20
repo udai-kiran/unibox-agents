@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# tree-snapshot — print a git tree id for the current working tree, untracked
+# (non-ignored) files included, without touching the real index or the tree.
+# Two snapshots bracket a worker's run; `git diff <before> <after>` then shows
+# exactly what that worker changed, even on top of uncommitted work.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+index="$tmp/index"
+
+cd "$root"
+export GIT_INDEX_FILE="$index"
+git read-tree HEAD
+git add -A
+git write-tree

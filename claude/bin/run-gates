@@ -1,0 +1,458 @@
+#!/usr/bin/env bash
+# run-gates — run the repo's typecheck/lint/test gates and capture literal output.
+# Read-only w.r.t. source; writes only the named report file. Non-zero exit if any gate failed.
+set -uo pipefail
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: run-gates <report-path> [-w <workspace>] [-t <test-target>]
+
+  <report-path>   file the literal gate output is written to (repo-root-relative
+                  unless absolute), e.g. tasks/<task>/gates-1.txt.
+                  Append-only: an existing file is never overwritten.
+  -w <workspace>  narrow typecheck+lint+test to one workspace (e.g. packages/api).
+                  If the workspace directory has a pyproject.toml, all three
+                  gates switch to the Python toolchain for it (uv run pyright,
+                  uv run ruff check + ruff format --check, uv run pytest)
+                  instead of npm. Otherwise it's an npm
+                  workspace, as before.
+  -t <target>     narrow the test gate to one file/dir: `node --test <target>`
+                  (npm mode) or `uv run pytest <target>` (Python mode). Note:
+                  bare `node --test` does not pass extra flags the
+                  workspace's own test script may set.
+
+Runs, from the repo root, in order:
+  npm mode (default, or -w names an npm workspace):
+    1. typecheck   (npm run typecheck [-w WS])
+    2. lint        (npm run lint)                # root eslint, always full
+    3. test        (npm run test [-w WS] | node --test TARGET)
+  Python mode (-w names a directory with a pyproject.toml):
+    1. typecheck   (uv run pyright)
+    2. lint        (uv run ruff check && uv run ruff format --check)
+    3. test        (uv run pytest [TARGET])
+  Python-mode lint and typecheck are unconditional — every Python file in
+  the workspace is checked on every run, not just ones a worker touched;
+  pyright's warnings are always included in the digest, not only errors,
+  though only a pyright error (not a bare warning) fails the gate today.
+
+Each gate's exact command line, combined stdout+stderr, and exit code are
+written verbatim to the report. A compact digest is printed to stdout.
+Overall exit is non-zero if ANY gate failed or a test run has no valid,
+nonzero test summary.
+EOF
+}
+
+if [[ $# -lt 1 || -z "${1:-}" ]]; then usage; exit 2; fi
+case "$1" in -h|--help) usage; exit 0 ;; esac
+dest="$1"; shift
+ws=""; target=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -w) ws="${2:-}"; shift 2 ;;
+        -t) target="${2:-}"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "error: unknown argument: $1" >&2; usage; exit 2 ;;
+    esac
+done
+
+command -v git >/dev/null 2>&1 || { echo "error: git not found on PATH" >&2; exit 127; }
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "error: not inside a git repository" >&2; exit 1; }
+
+py_ws=""
+if [[ -n "$ws" && -f "$repo_root/$ws/pyproject.toml" ]]; then
+    py_ws="$ws"
+fi
+
+if [[ -n "$py_ws" ]]; then
+    command -v uv >/dev/null 2>&1 || { echo "error: uv not found on PATH" >&2; exit 127; }
+else
+    command -v npm >/dev/null 2>&1 || { echo "error: npm not found on PATH" >&2; exit 127; }
+fi
+
+[[ "$dest" == /* ]] || dest="$repo_root/$dest"
+if [[ -e "$dest" ]]; then
+    echo "error: report path already exists: $dest" >&2
+    echo "       gate reports are append-only; use the next iteration number" >&2
+    exit 1
+fi
+mkdir -p "$(dirname "$dest")" || { echo "error: cannot create report directory: $(dirname "$dest")" >&2; exit 1; }
+
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/run-gates.XXXXXX")" || { echo "error: mktemp failed" >&2; exit 1; }
+trap 'rm -rf "$tmp_dir"' EXIT
+tmp="$tmp_dir/report"
+commit="$(cd "$repo_root" && git rev-parse HEAD 2>/dev/null)"
+# Candidate-identity fingerprint: hashes the full working-tree diff against
+# HEAD (staged + unstaged). Two gate runs with matching commit+diff-sha256
+# ran against the identical tree; a mismatch means the tree moved between
+# them, so any prior verification/review is against a superseded candidate.
+diff_sha="$(cd "$repo_root" && git diff HEAD 2>/dev/null | sha256sum | cut -d' ' -f1)"
+declare -A gate_command gate_status
+
+echo "gates report target: $dest" >&2
+
+toolchain="npm"
+[[ -n "$py_ws" ]] && toolchain="python (uv)"
+
+{
+    echo "run-gates report"
+    echo "repo:        $repo_root"
+    echo "commit:      $commit"
+    echo "diff-sha256: $diff_sha"
+    echo "branch:      $(cd "$repo_root" && git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    echo "date:        $(date -u +%FT%TZ)"
+    echo "workspace:   ${ws:-<all>}"
+    echo "toolchain:   $toolchain"
+    echo "test-tgt:    ${target:-<full suite>}"
+    echo
+} >>"$tmp"
+
+overall=0
+gate_cwd="$repo_root"
+[[ -n "$py_ws" ]] && gate_cwd="$repo_root/$py_ws"
+run_gate() {
+    local name="$1"; shift
+    local command output_file status=0
+    printf -v command '%q ' "$@"
+    command="${command% }"
+    gate_command["$name"]="$command"
+    output_file="$tmp_dir/$name.out"
+    echo "running gate: $name -> $command" >&2
+    {
+        echo "=== gate: $name ==="
+        echo "\$ $command"
+        echo "--- output ---"
+    } >>"$tmp"
+    ( cd "$gate_cwd" && "$@" ) >"$output_file" 2>&1 || status=$?
+    cat "$output_file" >>"$tmp"
+    {
+        echo "--- exit code: $status ---"
+        echo
+    } >>"$tmp"
+    gate_status["$name"]="$status"
+    [[ $status -ne 0 ]] && overall=1
+    echo "gate $name exit: $status" >&2
+    return 0
+}
+
+# npm prints a package header before each workspace's node --test run. Require
+# all six node:test summary fields for each run, including runs that exit 0.
+test_summary() {
+    local mode="npm"
+    [[ -n "$target" ]] && mode="target"
+    awk -v mode="$mode" -v target="$target" -v root_name="$(basename "$repo_root")" '
+        function value(key) { return seen[key] == 1 ? counts[key] : "?" }
+        function finish(    i, reason, total) {
+            if (!active) return
+            reason = ""
+            for (i = 1; i <= 6; i++) {
+                if (seen[fields[i]] != 1) reason = "summary missing/unparseable"
+            }
+            if (invalid) reason = "summary missing/unparseable"
+            if (reason == "") {
+                total = counts["pass"] + counts["fail"] + counts["skipped"] + counts["todo"] + counts["cancelled"]
+                if (counts["tests"] != total) reason = "inconsistent summary counts"
+                else if (counts["tests"] == 0) reason = "zero tests"
+                else if (counts["fail"] > 0 || counts["cancelled"] > 0) reason = "test failures"
+            }
+            printf "  %s: tests %s; pass %s, fail %s, skipped %s, todo %s, cancelled %s", \
+                label, value("tests"), value("pass"), value("fail"), value("skipped"), value("todo"), value("cancelled")
+            if (reason != "") { printf " [FAILED: %s]", reason; bad = 1 }
+            print ""
+            delete seen
+            delete counts
+            invalid = 0
+            active = 0
+        }
+        BEGIN {
+            split("tests pass fail skipped todo cancelled", fields, " ")
+            if (mode == "target") { label = target; active = 1; runs = 1 }
+        }
+        mode == "npm" && /^> [^ ]+@[^ ]+ test$/ {
+            package = $2
+            sub(/@[^@]*$/, "", package)
+            if (package != root_name) { finish(); label = package; active = 1; runs++ }
+            next
+        }
+        active && /^ℹ (tests|pass|fail|skipped|todo|cancelled)( |$)/ {
+            if (NF != 3 || $3 !~ /^[0-9]+$/ || seen[$2]++) invalid = 1
+            else counts[$2] = $3 + 0
+        }
+        END {
+            finish()
+            if (runs == 0) { print "  no node:test run detected [FAILED: summary missing/unparseable]"; bad = 1 }
+            if (bad) exit 1
+        }
+    ' "$tmp_dir/test.out"
+}
+
+# pytest's final summary line, e.g. "==== 12 passed, 2 failed in 3.45s ====".
+# "warnings"/"deselected" pieces are parsed but not counted toward total.
+test_summary_py() {
+    awk '
+        /^=+.* in [0-9.]+s.*=+$/ {
+            found = 1
+            line = $0
+            sub(/^=+ */, "", line)
+            sub(/ *=+$/, "", line)
+            sub(/ in [0-9.]+s.*$/, "", line)
+            n = split(line, parts, ", ")
+            for (i = 1; i <= n; i++) {
+                piece = parts[i]
+                gsub(/^ +| +$/, "", piece)
+                m = split(piece, kv, " ")
+                if (m == 2 && kv[1] ~ /^[0-9]+$/) counts[kv[2]] += kv[1] + 0
+            }
+        }
+        END {
+            if (!found) {
+                print "  no pytest summary line detected [FAILED: summary missing/unparseable]"
+                exit 1
+            }
+            passed = counts["passed"] + 0
+            failed = counts["failed"] + 0
+            err = counts["error"] + counts["errors"]
+            skipped = counts["skipped"] + 0
+            xfailed = counts["xfailed"] + 0
+            xpassed = counts["xpassed"] + 0
+            total = passed + failed + err + skipped + xfailed + xpassed
+            printf "  pytest: tests %d; pass %d, fail %d, skipped %d, errors %d", total, passed, failed, skipped, err
+            reason = ""
+            if (total == 0) reason = "zero tests"
+            else if (failed > 0 || err > 0) reason = "test failures"
+            if (reason != "") { printf " [FAILED: %s]", reason; bad = 1 }
+            print ""
+            if (bad) exit 1
+        }
+    ' "$tmp_dir/test.out"
+}
+
+# Keep digest lines short even when a compiler, linter, or test prints a huge
+# message. The report retains the original bytes.
+show_tail() {
+    local output_file="$1"
+    echo "  last 8 output lines (full output: $dest):"
+    if [[ ! -s "$output_file" ]]; then
+        echo "    (no output)"
+        return
+    fi
+    tail -n 8 "$output_file" | awk '{ if (length($0) > 240) print "    " substr($0, 1, 237) "..."; else print "    " $0 }'
+}
+
+show_typecheck_errors() {
+    awk -v report="$dest" '
+        /error TS[0-9]+:/ {
+            count++
+            if (count <= 12) {
+                if (length($0) > 240) print "  " substr($0, 1, 237) "..."
+                else print "  " $0
+            }
+        }
+        END {
+            if (count > 12) printf "  ... %d more TypeScript errors omitted; full output: %s\n", count - 12, report
+            if (count == 0) exit 1
+        }
+    ' "$tmp_dir/typecheck.out"
+}
+
+show_pyright_diagnostics() {
+    awk -v report="$dest" '
+        /^\// || /^[A-Za-z]:[\\\/]/ { file = $0; next }
+        /^[[:space:]]*[0-9]+:[0-9]+ - (error|warning):/ {
+            count++
+            if ($0 ~ / - error:/) ecount++; else wcount++
+            if (count <= 12) {
+                line = file ": " $0
+                gsub(/^[[:space:]]+/, " ", line)
+                if (length(line) > 240) print "  " substr(line, 1, 237) "..."
+                else print "  " line
+            }
+        }
+        END {
+            if (count > 12) printf "  ... %d more pyright diagnostics omitted; full output: %s\n", count - 12, report
+            if (count > 0) printf "  pyright: %d error(s), %d warning(s)\n", ecount + 0, wcount + 0
+            if (count == 0) exit 1
+        }
+    ' "$tmp_dir/typecheck.out"
+}
+
+show_ruff_errors() {
+    awk -v report="$dest" '
+        /^[^ :]+\.py:[0-9]+:[0-9]+: / {
+            count++
+            if (count <= 12) {
+                if (length($0) > 240) print "  " substr($0, 1, 237) "..."
+                else print "  " $0
+            }
+            next
+        }
+        /^[[:space:]]*--> [^[:space:]]+:[0-9]+:[0-9]+/ {
+            count++
+            line = $0
+            gsub(/^[[:space:]]*--> /, "", line)
+            if (count <= 12) print "  " line ": would be reformatted"
+        }
+        END {
+            if (count > 12) printf "  ... %d more ruff problems omitted; full output: %s\n", count - 12, report
+            if (count == 0) exit 1
+        }
+    ' "$tmp_dir/lint.out"
+}
+
+show_lint_errors() {
+    awk -v report="$dest" '
+        /^[^[:space:]].*\.[cm]?[jt]sx?$/ { file = $0 }
+        /^[[:space:]]*[0-9]+:[0-9]+[[:space:]]+(error|warning)[[:space:]]+/ {
+            count++
+            if (count <= 12) {
+                line = file ": " $0
+                if (length(line) > 240) print "  " substr(line, 1, 237) "..."
+                else print "  " line
+            }
+        }
+        END {
+            if (count > 12) printf "  ... %d more ESLint problems omitted; full output: %s\n", count - 12, report
+            if (count == 0) exit 1
+        }
+    ' "$tmp_dir/lint.out"
+}
+
+show_test_failures() {
+    awk -v report="$dest" '
+        function short(line) { return length(line) > 240 ? substr(line, 1, 237) "..." : line }
+        function name_of(line) {
+            sub(/^✖ /, "", line)
+            sub(/ \([^)]*ms\)$/, "", line)
+            return line
+        }
+        function finish(    i) {
+            if (!active) return
+            total++
+            if (total <= 8) {
+                print "  - " short(name)
+                print "    location: " short(location)
+                if (body[1] ~ /test failed/ && error[name] != "") {
+                    print "    " short(error[name])
+                    if (error_at[name] != "") print "    " short(error_at[name])
+                } else {
+                    for (i = 1; i <= body_count && i <= 6; i++) print "    " short(body[i])
+                    if (body_count > 6) print "    ... detail truncated; full output: " report
+                }
+            }
+            delete body
+            body_count = 0
+            active = 0
+        }
+        /^✖ failing tests:/ { in_failures = 1; next }
+        in_failures && /^> [^ ]+@[^ ]+ test$/ { finish(); in_failures = 0 }
+        !in_failures {
+            if ($0 ~ /^[A-Za-z0-9_]*Error(:| \[)/) { latest_error = $0; latest_at = "" }
+            else if (latest_error != "" && latest_at == "" && $0 ~ /^[[:space:]]+at /) latest_at = $0
+            if ($0 ~ /^✖ /) {
+                key = name_of($0)
+                if (latest_error != "") { error[key] = latest_error; error_at[key] = latest_at }
+                latest_error = ""
+                latest_at = ""
+            }
+            if ($0 ~ /^✔ / || $0 ~ /^▶ /) { latest_error = ""; latest_at = "" }
+            next
+        }
+        /^test at / { finish(); location = substr($0, 9); name = "(unnamed failure)"; active = 1; next }
+        /^✖ / { name = name_of($0); next }
+        active && /[^[:space:]]/ { body_count++; if (body_count <= 6) body[body_count] = $0 }
+        END {
+            finish()
+            if (total > 8) printf "  ... %d more failing tests omitted; full output: %s\n", total - 8, report
+            if (total == 0) exit 1
+        }
+    ' "$tmp_dir/test.out"
+}
+
+if [[ -n "$py_ws" ]]; then
+    run_gate typecheck uv run pyright
+    run_gate lint bash -c 'uv run ruff check && uv run ruff format --check'
+    if [[ -n "$target" ]]; then
+        run_gate test uv run pytest "$target"
+    else
+        run_gate test uv run pytest
+    fi
+
+    test_summary_ok=1
+    test_summary_py >"$tmp_dir/test-summary" || { test_summary_ok=0; overall=1; }
+else
+    if [[ -n "$ws" ]]; then
+        run_gate typecheck npm run typecheck -w "$ws"
+    else
+        run_gate typecheck npm run typecheck
+    fi
+
+    run_gate lint npm run lint
+
+    if [[ -n "$target" ]]; then
+        run_gate test node --test "$target"
+    elif [[ -n "$ws" ]]; then
+        run_gate test npm run test -w "$ws"
+    else
+        run_gate test npm run test
+    fi
+
+    test_summary_ok=1
+    test_summary >"$tmp_dir/test-summary" || { test_summary_ok=0; overall=1; }
+fi
+
+if ! cp "$tmp" "$dest"; then
+    echo "error: cannot write report to $dest; report kept at $tmp" >&2
+    trap - EXIT
+    exit 1
+fi
+echo "gates report written to: $dest" >&2
+
+if [[ $overall -eq 0 ]]; then
+    echo "gate digest: PASSED"
+else
+    echo "gate digest: FAILED"
+fi
+echo "report: $dest"
+echo "commit: $commit"
+echo "diff-sha256: $diff_sha"
+for name in typecheck lint test; do
+    state="passed"
+    if [[ ${gate_status[$name]} -ne 0 || ( "$name" == test && $test_summary_ok -eq 0 ) ]]; then state="FAILED"; fi
+    echo "$name: ${gate_command[$name]} (exit ${gate_status[$name]}; $state)"
+done
+echo "test runs:"
+cat "$tmp_dir/test-summary"
+
+if [[ -n "$py_ws" ]]; then
+    if [[ ${gate_status[typecheck]} -ne 0 ]] || grep -q ' - warning:' "$tmp_dir/typecheck.out" 2>/dev/null; then
+        echo "typecheck (pyright — errors and warnings):"
+        show_pyright_diagnostics || show_tail "$tmp_dir/typecheck.out"
+    fi
+    if [[ ${gate_status[lint]} -ne 0 ]]; then
+        echo "lint problems:"
+        show_ruff_errors || show_tail "$tmp_dir/lint.out"
+    fi
+    if [[ ${gate_status[test]} -ne 0 || $test_summary_ok -eq 0 ]]; then
+        echo "test failures:"
+        show_tail "$tmp_dir/test.out"
+    fi
+else
+    if [[ ${gate_status[typecheck]} -ne 0 ]]; then
+        echo "typecheck errors:"
+        show_typecheck_errors || show_tail "$tmp_dir/typecheck.out"
+    fi
+    if [[ ${gate_status[lint]} -ne 0 ]]; then
+        echo "lint problems:"
+        show_lint_errors || show_tail "$tmp_dir/lint.out"
+    fi
+    if [[ ${gate_status[test]} -ne 0 || $test_summary_ok -eq 0 ]]; then
+        echo "test failures:"
+        show_test_failures || show_tail "$tmp_dir/test.out"
+    fi
+fi
+
+if [[ $overall -eq 0 ]]; then
+    echo "all gates passed" >&2
+else
+    echo "one or more gates FAILED" >&2
+fi
+exit "$overall"
