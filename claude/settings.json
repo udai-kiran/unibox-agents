@@ -1,0 +1,13 @@
+{
+  "model": "opus",
+  "effortLevel": "high",
+  "advisorModel": "fable",
+  "tui": "fullscreen",
+  "theme": "auto",
+  "autoCompactEnabled": true,
+  "statusLine": {
+    "type": "command",
+    "command": "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/statusline.sh",
+    "padding": 0
+  }
+}

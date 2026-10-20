@@ -87,11 +87,18 @@ RUN git clone https://github.com/udai-kiran/multi-agent-workflow.git ~/multi-age
     && ln -s "$(command -v fdfind)" ~/.local/bin/fd
 
 # Install the workflow into each agent's config dir and register inodex as an MCP server
-# for claude and codex. Volumes only inherit this when first created (see README).
+# for claude, codex, agy and opencode. Volumes only inherit this when first created (see README).
+# claude/: the host's status line and non-sensitive settings, merged over the workflow's settings.json.
+COPY --chown=${USERNAME}:${USERNAME} claude/ ${HOME}/.claude-overlay/
 RUN cp -r ~/multi-agent-workflow/.claude/. ~/.claude/ \
+    && install -m 0755 ~/.claude-overlay/statusline.sh ~/.claude/statusline.sh \
+    && jq -s '.[0] * .[1]' ~/.claude/settings.json ~/.claude-overlay/settings.json > ~/.claude/settings.merged \
+    && mv ~/.claude/settings.merged ~/.claude/settings.json && rm -rf ~/.claude-overlay \
     && cp ~/multi-agent-workflow/.codex/AGENTS.md ~/.codex/AGENTS.md \
     && claude mcp add --scope user inodex -- inodex serve \
-    && printf '\n[mcp_servers.inodex]\ncommand = "inodex"\nargs = ["serve"]\n' >> ~/.codex/config.toml
+    && printf '\n[mcp_servers.inodex]\ncommand = "inodex"\nargs = ["serve"]\n' >> ~/.codex/config.toml \
+    && agy mcp add inodex inodex serve \
+    && printf '{"mcp":{"inodex":{"type":"local","command":["inodex","serve"]}}}\n' > ~/.config/opencode/opencode.json
 
 # herdr agent integrations: hooks/extensions that let herdr see each agent's state
 RUN for agent in claude codex opencode pi antigravity-cli; do herdr integration install "$agent"; done \
