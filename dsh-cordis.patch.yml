@@ -1,0 +1,11 @@
+# Home-level patch: applies to every dsh profile. Registers inodex as an MCP server.
+- insert:
+    - id: mcp-inodex
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: inodex
+        transport: stdio
+        command: inodex
+        args: [serve]
+        env:
+          INODEX_DATA_DIR: !!js process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:os').homedir(), '.inodex')
