@@ -16,6 +16,16 @@ To run several agents side by side, start `herdr` in the shell. It gives each ag
 
 **Multi-agent workflow (work in progress).** [inodex](https://github.com/udai-kiran/inodex) is installed and registered as an MCP server for claude (`~/.claude`), codex (`~/.codex/config.toml`), agy, opencode, pi and dsh (dsh via `dsh-cordis.patch.yml`, its home-level patch), so agents can message each other through `~/.inodex`. The [multi-agent-workflow](https://github.com/udai-kiran/multi-agent-workflow) agents, hooks and settings are copied into `~/.claude`, and its `AGENTS.md` into `~/.codex`. The status line and a few display/model settings from the host's `~/.claude` (`claude/statusline.sh`, `claude/settings.json`) are merged over the workflow's `settings.json`. The repo is also kept at `~/multi-agent-workflow` (use `scripts/copy-agentic-files.sh <project>` to copy it into a project). Both are pinned by build args. Volumes only pick up the image's files when first created, so for an existing one run `docker compose down -v` or copy them in by hand.
 
+**Team (claude orchestrates, codex reviews, agy/pi/dsh work).** Role prompts are in `~/roles/` (source: `roles/`). Open one herdr pane per agent, start the tool, and paste one line:
+
+| Pane | Command | First message |
+| --- | --- | --- |
+| orchestrator | `claude` | `Read ~/roles/orchestrator.md and follow it.` |
+| reviewer | `codex` | `Read ~/roles/reviewer.md and follow it.` |
+| workers | `agy`, `pi`, `dsh` | `Read ~/roles/worker.md and follow it. Your name is <agy\|pi\|dsh>.` |
+
+Start the workers and the reviewer first, then give the orchestrator a task. The message types and rules are in `roles/protocol.md`.
+
 **dsh** ([DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), developer preview) needs a profile: `dsh headless "task"` answers one task and exits. Its state lives in the `dsh` volume (`~/.dsh`). `dsh web` serves a browser UI, but the compose file does not publish a port for it yet. There is no terminal UI profile in the npm package.
 
 First run: log in once per agent inside the container. Logins are stored in Docker named volumes and survive `--rm`.

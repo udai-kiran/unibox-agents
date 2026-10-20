@@ -103,6 +103,9 @@ RUN cp -r ~/multi-agent-workflow/.claude/. ~/.claude/ \
 
 COPY --chown=${USERNAME}:${USERNAME} dsh-cordis.patch.yml ${HOME}/.dsh/cordis.patch.yml
 
+# Team role prompts (orchestrator/reviewer/worker) for the inodex multi-agent setup
+COPY --chown=${USERNAME}:${USERNAME} roles/ ${HOME}/roles/
+
 # herdr agent integrations: hooks/extensions that let herdr see each agent's state
 RUN for agent in claude codex opencode pi antigravity-cli; do herdr integration install "$agent"; done \
     && herdr integration status
