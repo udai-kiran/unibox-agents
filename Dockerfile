@@ -87,7 +87,7 @@ RUN git clone https://github.com/udai-kiran/multi-agent-workflow.git ~/multi-age
     && ln -s "$(command -v fdfind)" ~/.local/bin/fd
 
 # Install the workflow into each agent's config dir and register inodex as an MCP server
-# for claude, codex, agy and opencode. Volumes only inherit this when first created (see README).
+# for claude, codex, agy, opencode, pi and dsh. Volumes only inherit this when first created (see README).
 # claude/: the host's status line and non-sensitive settings, merged over the workflow's settings.json.
 COPY --chown=${USERNAME}:${USERNAME} claude/ ${HOME}/.claude-overlay/
 RUN cp -r ~/multi-agent-workflow/.claude/. ~/.claude/ \
@@ -98,7 +98,10 @@ RUN cp -r ~/multi-agent-workflow/.claude/. ~/.claude/ \
     && claude mcp add --scope user inodex -- inodex serve \
     && printf '\n[mcp_servers.inodex]\ncommand = "inodex"\nargs = ["serve"]\n' >> ~/.codex/config.toml \
     && agy mcp add inodex inodex serve \
+    && pi mcp add inodex -- inodex serve \
     && printf '{"mcp":{"inodex":{"type":"local","command":["inodex","serve"]}}}\n' > ~/.config/opencode/opencode.json
+
+COPY --chown=${USERNAME}:${USERNAME} dsh-cordis.patch.yml ${HOME}/.dsh/cordis.patch.yml
 
 # herdr agent integrations: hooks/extensions that let herdr see each agent's state
 RUN for agent in claude codex opencode pi antigravity-cli; do herdr integration install "$agent"; done \
