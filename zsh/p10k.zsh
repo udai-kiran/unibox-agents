@@ -32,6 +32,7 @@
   # The list of segments shown on the left. Fill it with the most important segments.
   typeset -g POWERLEVEL9K_LEFT_PROMPT_ELEMENTS=(
     # =========================[ Line #1 ]=========================
+    container               # unibox-agents marker (custom, defined below)
     os_icon                 # os identifier
     dir                     # current directory
     vcs                     # git status
@@ -191,6 +192,12 @@
   typeset -g POWERLEVEL9K_RIGHT_PROMPT_LAST_SEGMENT_END_SYMBOL=''
   # Left prompt terminator for lines without any segments.
   typeset -g POWERLEVEL9K_EMPTY_LINE_LEFT_PROMPT_LAST_SEGMENT_END_SYMBOL=
+
+  ###############################[ container: unibox-agents marker ]###############################
+  # Always shown, so it is obvious this shell is inside the container, not on the host.
+  function prompt_container() {
+    p10k segment -f 16 -b 208 -i $'' -t 'unibox-agents'
+  }
 
   #################################[ os_icon: os identifier ]##################################
   # OS identifier color.

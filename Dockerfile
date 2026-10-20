@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     ripgrep \
     less \
+    fd-find \
     tmux \
     unzip \
     zsh \
@@ -41,7 +42,7 @@ ENV CLAUDE_CONFIG_DIR=${HOME}/.claude
 
 # Pre-create the mount points so named volumes inherit agent ownership.
 RUN install -d -o ${USERNAME} -g ${USERNAME} /workspace \
-        ${HOME}/.zsh_history.d ${HOME}/.claude ${HOME}/.codex ${HOME}/.gemini ${HOME}/.pi \
+        ${HOME}/.zsh_history.d ${HOME}/.claude ${HOME}/.codex ${HOME}/.gemini ${HOME}/.gemini/config ${HOME}/.dsh ${HOME}/.dsh ${HOME}/.pi ${HOME}/.pi/agent ${HOME}/.pi/agent/extensions \
         ${HOME}/.config ${HOME}/.config/opencode ${HOME}/.local ${HOME}/.local/share ${HOME}/.local/share/opencode
 
 USER ${USERNAME}
@@ -63,9 +64,38 @@ RUN curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/insta
     && ln -s "$(dirname "$(dirname "$(nvm which default)")")" "$NVM_DIR/current" \
     && echo '. "$NVM_DIR/nvm.sh"' >> "$HOME/.bashrc"
 
-# codex, pi, opencode: npm (-> the LTS node's global bin)
-RUN npm install -g @openai/codex @earendil-works/pi-coding-agent opencode-ai \
+# codex, pi, opencode, dsh (DeepSeek Harness): npm (-> the LTS node's global bin)
+RUN npm install -g @openai/codex @earendil-works/pi-coding-agent opencode-ai @deepseek-ai/dsh \
     && npm cache clean --force
+
+# inodex: filesystem message exchange between agents (release binary, SHA256SUMS-verified)
+ARG INODEX_VERSION=v0.1.0
+RUN arch="$(dpkg --print-architecture)" \
+    && f="inodex-${INODEX_VERSION}-linux-${arch}" \
+    && cd "$(mktemp -d)" \
+    && curl -fsSLO "https://github.com/udai-kiran/inodex/releases/download/${INODEX_VERSION}/${f}" \
+    && curl -fsSLO "https://github.com/udai-kiran/inodex/releases/download/${INODEX_VERSION}/SHA256SUMS" \
+    && grep " ${f}\$" SHA256SUMS | sha256sum -c - \
+    && install -m 0755 "${f}" "$HOME/.local/bin/inodex" \
+    && inodex version
+
+# multi-agent-workflow: agent/hook/script template, kept at ~/multi-agent-workflow (pinned commit).
+# Its check-binaries.sh wants `fd`; Ubuntu installs it as `fdfind`.
+ARG WORKFLOW_REF=8881a432699c4f59f9789b21a97bbc74f088bc65
+RUN git clone https://github.com/udai-kiran/multi-agent-workflow.git ~/multi-agent-workflow \
+    && git -C ~/multi-agent-workflow checkout --quiet ${WORKFLOW_REF} \
+    && ln -s "$(command -v fdfind)" ~/.local/bin/fd
+
+# Install the workflow into each agent's config dir and register inodex as an MCP server
+# for claude and codex. Volumes only inherit this when first created (see README).
+RUN cp -r ~/multi-agent-workflow/.claude/. ~/.claude/ \
+    && cp ~/multi-agent-workflow/.codex/AGENTS.md ~/.codex/AGENTS.md \
+    && claude mcp add --scope user inodex -- inodex serve \
+    && printf '\n[mcp_servers.inodex]\ncommand = "inodex"\nargs = ["serve"]\n' >> ~/.codex/config.toml
+
+# herdr agent integrations: hooks/extensions that let herdr see each agent's state
+RUN for agent in claude codex opencode pi antigravity-cli; do herdr integration install "$agent"; done \
+    && herdr integration status
 
 # zsh: powerlevel10k prompt + autosuggestions. Needs a Nerd Font in your host terminal.
 ARG P10K_VERSION=v1.20.0
