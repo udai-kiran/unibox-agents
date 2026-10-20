@@ -1,0 +1,38 @@
+services:
+  agents:
+    image: unibox-agents:latest
+    build:
+      context: .
+      args:
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
+    stdin_open: true
+    tty: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 1024
+    environment:
+      - COLORTERM # pass the host terminal's truecolor support through
+      # Optional: API-key auth instead of interactive login. Unset = ignored.
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+      - GEMINI_API_KEY
+    volumes:
+      - workspace:/workspace
+      - zsh-history:/home/agent/.zsh_history.d
+      - claude:/home/agent/.claude
+      - codex:/home/agent/.codex
+      - gemini:/home/agent/.gemini # agy keeps its state in ~/.gemini/antigravity-cli
+      - pi:/home/agent/.pi
+      - opencode-config:/home/agent/.config/opencode
+      - opencode-data:/home/agent/.local/share/opencode
+
+volumes:
+  workspace:
+  zsh-history:
+  claude:
+  codex:
+  gemini:
+  pi:
+  opencode-config:
+  opencode-data:
